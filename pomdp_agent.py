@@ -107,8 +107,8 @@ class BeliefState:
             hand_rank, _ = hand_strength
             
             # Estimate hand strength (0-1 scale, higher is better)
-            # Invert hand_rank so higher values = stronger hands
-            strength = 1.0 - (hand_rank / 10.0)
+            # hand_rank: 0=High Card, 9=Royal Flush (higher rank = stronger hand)
+            strength = hand_rank / 9.0
             
             # Compute action likelihood based on hand strength and action type
             if action == Action.FOLD:
@@ -175,7 +175,8 @@ class OpponentModel:
         hand_rank, tie_breaker = hand_strength
         
         # Convert hand rank to strength (0-1, higher is better)
-        strength = 1.0 - (hand_rank / 10.0)
+        # hand_rank: 0=High Card, 9=Royal Flush (higher rank = stronger hand)
+        strength = hand_rank / 9.0
         
         legal_actions = game.get_legal_actions(state, is_agent=False)
         
@@ -292,19 +293,21 @@ class OpponentModel:
 class POMDPAgent:
     """POMDP-based agent using Monte Carlo rollouts for decision making"""
     
-    def __init__(self, num_rollouts: int = 100, discount_factor: float = 0.95):
+    def __init__(self, num_rollouts: int = 100, discount_factor: float = 0.95, risk_penalty: float = 0.1):
         """
         num_rollouts: Number of Monte Carlo simulations per action
         discount_factor: Discount factor for future rewards
+        risk_penalty: Lambda parameter for risk adjustment (penalizes high variance)
         """
         self.num_rollouts = num_rollouts
         self.discount_factor = discount_factor
+        self.risk_penalty = risk_penalty  # λ in Q_t(a) - λ·Std(R_t^{(i)}(a))
         self.game = PokerGame()
         self.evaluator = HandEvaluator()
         self.opponent_model = OpponentModel(behavior_type='mixed')
     
     def choose_action(self, state: GameState, belief: BeliefState, 
-                     remaining_rounds: int) -> Tuple[Action, Optional[int]]:
+                     remaining_rounds: int, opponent_model: OpponentModel) -> Tuple[Action, Optional[int]]:
         """
         Choose action using Monte Carlo rollouts.
         Returns (action, amount)
@@ -316,22 +319,30 @@ class POMDPAgent:
         
         # Evaluate each action using Monte Carlo rollouts
         action_values = {}
+        action_risks = {}  # Store variance for risk adjustment
         
         for action, amount in legal_actions:
-            q_value = self._monte_carlo_rollout(state, action, amount, belief, remaining_rounds)
+            q_value, std_dev = self._monte_carlo_rollout(state, action, amount, belief, remaining_rounds, opponent_model)
             action_values[(action, amount)] = q_value
+            action_risks[(action, amount)] = std_dev
         
-        # Select action with highest Q-value
-        best_action = max(action_values.items(), key=lambda x: x[1])
+        # Apply risk-aware adjustment: Q_t(a) - λ·Std(R_t^{(i)}(a))
+        risk_adjusted_values = {}
+        for (action, amount), q_val in action_values.items():
+            std_val = action_risks[(action, amount)]
+            risk_adjusted_values[(action, amount)] = q_val - self.risk_penalty * std_val
+        
+        # Select action with highest risk-adjusted Q-value
+        best_action = max(risk_adjusted_values.items(), key=lambda x: x[1])
         return best_action[0]
     
     def _monte_carlo_rollout(self, state: GameState, action: Action, amount: Optional[int],
-                            belief: BeliefState, remaining_rounds: int) -> float:
+                            belief: BeliefState, remaining_rounds: int, opponent_model: OpponentModel) -> Tuple[float, float]:
         """
         Perform Monte Carlo rollout to estimate Q-value of action.
-        Returns expected return.
+        Returns (expected return, standard deviation) for risk adjustment.
         """
-        total_return = 0.0
+        rewards = []
         
         for _ in range(self.num_rollouts):
             # Sample opponent hand from belief
@@ -345,14 +356,18 @@ class POMDPAgent:
             sim_state = self.game.apply_action(sim_state, action, amount, is_agent=True)
             
             # Simulate to end of hand
-            reward = self._simulate_hand(sim_state, opponent_hand, remaining_rounds)
+            reward = self._simulate_hand(sim_state, opponent_hand, remaining_rounds, opponent_model)
             
-            total_return += reward
+            rewards.append(reward)
         
-        return total_return / self.num_rollouts
+        # Calculate mean and standard deviation
+        mean_return = np.mean(rewards)
+        std_return = np.std(rewards) if len(rewards) > 1 else 0.0
+        
+        return (mean_return, std_return)
     
     def _simulate_hand(self, state: GameState, opponent_hand: List[Card], 
-                      remaining_rounds: int) -> float:
+                      remaining_rounds: int, opponent_model: OpponentModel) -> float:
         """
         Simulate hand to completion and return reward.
         """
@@ -370,7 +385,7 @@ class POMDPAgent:
             
             # Opponent's turn
             if not state.opponent_acted:
-                opp_action, opp_amount = self.opponent_model.choose_action(
+                opp_action, opp_amount = opponent_model.choose_action(
                     self.game, state, opponent_hand
                 )
                 state = self.game.apply_action(state, opp_action, opp_amount, is_agent=False)
@@ -380,14 +395,18 @@ class POMDPAgent:
                 agent_action, agent_amount = self._heuristic_action(state)
                 state = self.game.apply_action(state, agent_action, agent_amount, is_agent=True)
         
-        # Resolve hand
+        # Resolve hand and add winnings back to stacks
+        initial_agent_stack = state.agent_stack
         agent_won, opponent_won = self.game.resolve_hand(state)
-        initial_stack = state.agent_stack + agent_won
-        net_gain = agent_won - (state.pot - agent_won)
+        state.agent_stack += agent_won
+        state.opponent_stack += opponent_won
+        
+        # Calculate net gain for this hand
+        net_gain = state.agent_stack - initial_agent_stack
         
         # Add future value estimate (discounted)
         future_value = self._estimate_future_value(
-            state.agent_stack + net_gain, remaining_rounds - 1
+            state.agent_stack, remaining_rounds - 1
         )
         
         return net_gain + self.discount_factor * future_value
@@ -398,7 +417,8 @@ class POMDPAgent:
             state.hole_cards_agent, state.community_cards
         )
         hand_rank, _ = hand_strength
-        strength = 1.0 - (hand_rank / 10.0)
+        # hand_rank: 0=High Card, 9=Royal Flush (higher rank = stronger hand)
+        strength = hand_rank / 9.0
         
         legal_actions = self.game.get_legal_actions(state, is_agent=True)
         
@@ -427,17 +447,25 @@ class POMDPAgent:
     def _estimate_future_value(self, current_stack: int, remaining_rounds: int) -> float:
         """
         Estimate expected value of remaining rounds.
-        Simple heuristic: assume small positive expected value per round.
+        For now, assume break-even (no bias).
+        Can be learned from data or tuned based on strategy.
         """
         if remaining_rounds <= 0:
             return 0.0
         
-        # Conservative estimate: assume break-even or small loss per round
-        # This encourages risk-averse play
-        return remaining_rounds * (-5.0)  # Small expected loss per round
+        # Assume break-even per round (no pessimistic bias)
+        # This allows the agent to make decisions based on current hand strength
+        return 0.0
     
     def _copy_state(self, state: GameState) -> GameState:
         """Create a deep copy of game state"""
+        # Create a copy of the deck if it exists
+        deck_copy = None
+        if state.deck is not None:
+            from poker_game import Deck
+            deck_copy = Deck()
+            deck_copy.cards = state.deck.cards.copy()
+        
         return GameState(
             hole_cards_agent=state.hole_cards_agent.copy(),
             hole_cards_opponent=state.hole_cards_opponent.copy(),
@@ -454,6 +482,7 @@ class POMDPAgent:
             street=state.street,
             agent_acted=state.agent_acted,
             opponent_acted=state.opponent_acted,
-            hand_over=state.hand_over
+            hand_over=state.hand_over,
+            deck=deck_copy
         )
 

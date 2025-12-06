@@ -92,7 +92,7 @@ def test_single_hand():
         iter_count += 1
         
         if not state.agent_acted:
-            action, amount = agent.choose_action(state, belief, remaining_rounds=19)
+            action, amount = agent.choose_action(state, belief, remaining_rounds=19, opponent_model=opponent)
             state = game.apply_action(state, action, amount, is_agent=True)
         
         if not state.opponent_acted and not state.hand_over:

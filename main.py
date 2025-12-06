@@ -77,6 +77,10 @@ class MatchRunner:
     def _play_hand(self, state: GameState, agent: POMDPAgent, opponent_model: OpponentModel,
                    belief: BeliefState, remaining_rounds: int, verbose: bool = False) -> float:
         """Play a single hand to completion"""
+        # Record initial stacks
+        initial_agent_stack = state.agent_stack
+        initial_opponent_stack = state.opponent_stack
+        
         max_iterations = 100
         iteration = 0
         
@@ -85,7 +89,7 @@ class MatchRunner:
             
             # Agent's turn
             if not state.agent_acted and not state.hand_over:
-                action, amount = agent.choose_action(state, belief, remaining_rounds)
+                action, amount = agent.choose_action(state, belief, remaining_rounds, opponent_model)
                 state = self.game.apply_action(state, action, amount, is_agent=True)
                 
                 if verbose:
@@ -107,14 +111,18 @@ class MatchRunner:
                 if verbose:
                     print(f"Opponent: {opp_action.value}" + (f" {opp_amount}" if opp_amount else ""))
         
-        # Resolve hand
+        # Resolve hand and add winnings back to stacks
         agent_won, opponent_won = self.game.resolve_hand(state)
-        net_gain = agent_won - (state.pot - agent_won)
+        state.agent_stack += agent_won
+        state.opponent_stack += opponent_won
+        
+        # Calculate net gain for this hand
+        net_gain = state.agent_stack - initial_agent_stack
         
         return net_gain
 
 
-def run_experiments(num_matches: int = 100, num_rollouts: int = 50, 
+def run_experiments(num_matches: int = 100, num_rollouts: int = 100, 
                    opponent_type: str = 'mixed', verbose: bool = False):
     """
     Run experiments with POMDP agent against different opponent types.
@@ -131,7 +139,7 @@ def run_experiments(num_matches: int = 100, num_rollouts: int = 50,
     print(f"{'='*60}\n")
     
     # Initialize agent and opponent
-    agent = POMDPAgent(num_rollouts=num_rollouts, discount_factor=0.95)
+    agent = POMDPAgent(num_rollouts=num_rollouts, discount_factor=0.95, risk_penalty=0.1)
     opponent_model = OpponentModel(behavior_type=opponent_type)
     runner = MatchRunner(initial_stack=1000, small_blind=10, big_blind=20)
     evaluator = Evaluator()
@@ -153,7 +161,7 @@ def run_experiments(num_matches: int = 100, num_rollouts: int = 50,
     return evaluator
 
 
-def compare_opponents(num_matches: int = 50, num_rollouts: int = 50):
+def compare_opponents(num_matches: int = 50, num_rollouts: int = 100):
     """Compare agent performance against different opponent types"""
     opponent_types = ['tight', 'loose', 'aggressive', 'mixed']
     results = {}
@@ -193,7 +201,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Run POMDP poker agent experiments')
     parser.add_argument('--matches', type=int, default=100, help='Number of matches to run')
-    parser.add_argument('--rollouts', type=int, default=50, help='Number of Monte Carlo rollouts')
+    parser.add_argument('--rollouts', type=int, default=100, help='Number of Monte Carlo rollouts')
     parser.add_argument('--opponent', type=str, default='mixed', 
                        choices=['tight', 'loose', 'aggressive', 'mixed'],
                        help='Opponent behavior type')

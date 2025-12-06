@@ -4,9 +4,12 @@ Implements the core game logic including card dealing, betting rounds, and hand 
 """
 
 import random
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, TYPE_CHECKING
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class Action(Enum):
@@ -207,6 +210,7 @@ class GameState:
     agent_acted: bool
     opponent_acted: bool
     hand_over: bool
+    deck: Optional[Deck] = None  # Deck for this hand (to maintain consistency)
 
 
 class PokerGame:
@@ -258,7 +262,8 @@ class PokerGame:
             street='preflop',
             agent_acted=(dealer == 1),  # Big blind acts first preflop
             opponent_acted=(dealer == 0),
-            hand_over=False
+            hand_over=False,
+            deck=deck  # Save deck for consistent dealing
         )
     
     def get_legal_actions(self, state: GameState, is_agent: bool) -> List[Tuple[Action, Optional[int]]]:
@@ -390,33 +395,31 @@ class PokerGame:
     
     def _advance_street(self, state: GameState) -> GameState:
         """Advance to next betting street (flop, turn, river)"""
-        if state.street == 'preflop':
-            # Deal flop
-            deck = Deck()
-            # Remove already dealt cards
+        if state.deck is None:
+            # Fallback: create new deck if not available
+            state.deck = Deck()
             all_dealt = state.hole_cards_agent + state.hole_cards_opponent
-            deck.cards = [c for c in deck.cards if not any(
+            state.deck.cards = [c for c in state.deck.cards if not any(
                 c.rank == d.rank and c.suit == d.suit for d in all_dealt
             )]
-            state.community_cards = deck.deal(3)
+        
+        if state.street == 'preflop':
+            # Burn one card, then deal flop
+            if len(state.deck.cards) > 0:
+                state.deck.deal(1)  # Burn card
+            state.community_cards = state.deck.deal(3)
             state.street = 'flop'
         elif state.street == 'flop':
-            # Deal turn
-            deck = Deck()
-            all_dealt = state.hole_cards_agent + state.hole_cards_opponent + state.community_cards
-            deck.cards = [c for c in deck.cards if not any(
-                c.rank == d.rank and c.suit == d.suit for d in all_dealt
-            )]
-            state.community_cards.append(deck.deal(1)[0])
+            # Burn one card, then deal turn
+            if len(state.deck.cards) > 0:
+                state.deck.deal(1)  # Burn card
+            state.community_cards.append(state.deck.deal(1)[0])
             state.street = 'turn'
         elif state.street == 'turn':
-            # Deal river
-            deck = Deck()
-            all_dealt = state.hole_cards_agent + state.hole_cards_opponent + state.community_cards
-            deck.cards = [c for c in deck.cards if not any(
-                c.rank == d.rank and c.suit == d.suit for d in all_dealt
-            )]
-            state.community_cards.append(deck.deal(1)[0])
+            # Burn one card, then deal river
+            if len(state.deck.cards) > 0:
+                state.deck.deal(1)  # Burn card
+            state.community_cards.append(state.deck.deal(1)[0])
             state.street = 'river'
         elif state.street == 'river':
             # Showdown
